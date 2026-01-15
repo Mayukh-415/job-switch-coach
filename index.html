@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Job Prep AI Coach</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://unpkg.com/lucide-react@0.263.1/dist/umd/lucide-react.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+  
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+    const { BookOpen, Trophy, Target, MessageSquare, Plus, ChevronRight, Check, X, Lightbulb } = lucideReact;
+
+    const JobPrepAgent = () => {
+      const [topics, setTopics] = useState([]);
+      const [currentView, setCurrentView] = useState('dashboard');
+      const [selectedTopic, setSelectedTopic] = useState(null);
+      const [chatMessages, setChatMessages] = useState([]);
+      const [userInput, setUserInput] = useState('');
+      const [isLoading, setIsLoading] = useState(false);
+      const [showAddTopic, setShowAddTopic] = useState(false);
+      const [newTopicName, setNewTopicName] = useState('');
+
+      useEffect(() => {
+        loadData();
+      }, []);
+
+      const loadData = async () => {
+        try {
+          const topicsData = await window.storage.get('job-prep-topics');
+          if (topicsData?.value) {
+            setTopics(JSON.parse(topicsData.value));
+          }
+        } catch (error) {
+          console.log('No saved data yet');
+        }
+      };
+
+      const saveTopics = async (updatedTopics) => {
+        try {
+          await window.storage.set('job-prep-topics', JSON.stringify(updatedTopics));
+          setTopics(updatedTopics);
+        } catch (error) {
+          console.error('Error saving:', error);
+        }
+      };
+
+      const generateLearningPath = async (topicName) => {
+        setIsLoading(true);
+        try {
+          const response = await fetch("https://api.anthropic.com/v1/messages", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              model: "claude-sonnet-4-20250514",
+              max_tokens: 1000,
+              messages: [{
+                role: "user",
+                content: `Create a structured learning path for a software engineer preparing for job interviews on the topic: "${topicName}". 
+
+Return ONLY a JSON object (no markdown, no backticks) with this structure:
+{
+  "subtopics": [
+    {
+      "name": "subtopic name",
+      "description": "brief description",
+      "estimatedHours": number,
+      "resources": ["resource1", "resource2"]
+    }
+  ],
+  "tips": ["tip1", "tip2", "tip3"]
+}`
+              }]
+            })
+          });
+
+          const data = await response.json();
+          const content = data.content[0].text;
+          const cleanContent = content.replace(/```json\n?|\n?```/g, '').trim();
+          const parsed = JSON.parse(cleanContent);
+
+          const newTopic = {
+            id: Date.now(),
+            name: topicName,
+            subtopics: parsed.subtopics.map((st, idx) => ({
+              ...st,
+              id: idx,
+              completed: false
+            })),
+            tips: parsed.tips,
+            progress: 0,
+            createdAt: new Date().toISOString()
+          };
+
+          const updatedTopics = [...topics, newTopic];
+          await saveTopics(updatedTopics);
+          setShowAddTopic(false);
+          setNewTopicName('');
+        } catch (error) {
+          console.error('Error:', error);
+          alert('Failed to generate learning path. Please try again.');
+        }
+        setIsLoading(false);
+      };
+
+      const toggleSubtopic = async (topicId, subtopicId) => {
+        const updatedTopics = topics.map(topic => {
+          if (topic.id === topicId) {
+            const updatedSubtopics = topic.subtopics.map(st =>
+              st.id === subtopicId ? { ...st, completed: !st.completed } : st
+            );
+            const completed = updatedSubtopics.filter(st => st.completed).length;
+            const progress = Math.round((completed / updatedSubtopics.length) * 100);
+            return { ...topic, subtopics: updatedSubtopics, progress };
+          }
+          return topic;
+        });
+        await saveTopics(updatedTopics);
+      };
+
+      const askQuestion = async () => {
+        if (!userInput.trim() || !selectedTopic) return;
+
+        const userMessage = { role: 'user', text: userInput };
+        setChatMessages(prev => [...prev, userMessage]);
+        setUserInput('');
+        setIsLoading(true);
+
+        try {
+          const context = `Topic: ${selectedTopic.name}
+Subtopics: ${selectedTopic.subtopics.map(st => st.name).join(', ')}
+Progress: ${selectedTopic.progress}%
+
+User question: ${userInput}
+
+Provide a helpful, concise response as a job interview prep coach. If relevant, suggest specific areas to focus on or quiz them.`;
+
+          const response = await fetch("https://api.anthropic.com/v1/messages", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              model: "claude-sonnet-4-20250514",
+              max_tokens: 1000,
+              messages: [{ role: "user", content: context }]
+            })
+          });
+
+          const data = await response.json();
+          const aiMessage = { role: 'assistant', text: data.content[0].text };
+          setChatMessages(prev => [...prev, aiMessage]);
+        } catch (error) {
+          console.error('Error:', error);
+          setChatMessages(prev => [...prev, { 
+            role: 'assistant', 
+            text: 'Sorry, I had trouble responding. Please try again.' 
+          }]);
+        }
+        setIsLoading(false);
+      };
+
+      const deleteTopic = async (topicId) => {
+        const updatedTopics = topics.filter(t => t.id !== topicId);
+        await saveTopics(updatedTopics);
+        if (selectedTopic?.id === topicId) {
+          setSelectedTopic(null);
+          setCurrentView('dashboard');
+        }
+      };
+
+      const totalProgress = topics.length > 0 
+        ? Math.round(topics.reduce((acc, t) => acc + t.progress, 0) / topics.length)
+        : 0;
+
+      return (
+        <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 text-white p-4">
+          <div className="max-w-6xl mx-auto">
+            {/* Header */}
+            <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6 mb-6 border border-white/20">
+              <h1 className="text-3xl font-bold mb-2">🚀 Job Prep AI Coach</h1>
+              <p className="text-purple-200">Your personalized software engineering interview preparation assistant</p>
+            </div>
+
+            {/* Navigation */}
+            <div className="flex gap-3 mb-6">
+              <button
+                onClick={() => setCurrentView('dashboard')}
+                className={`flex items-center gap-2 px-4 py-2 rounded-lg transition ${
+                  currentView === 'dashboard' 
+                    ? 'bg-purple-500 text-white' 
+                    : 'bg-white/10 hover:bg-white/20'
+                }`}
+              >
+                <Target size={18} />
+                Dashboard
+              </button>
+              <button
+                onClick={() => setCurrentView('topics')}
+                className={`flex items-center gap-2 px-4 py-2 rounded-lg transition ${
+                  currentView === 'topics' 
+                    ? 'bg-purple-500 text-white' 
+                    : 'bg-white/10 hover:bg-white/20'
+                }`}
+              >
+                <BookOpen size={18} />
+                My Topics
+              </button>
+            </div>
+
+            {/* Dashboard View */}
+            {currentView === 'dashboard' && (
+              <div className="space-y-6">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div className="bg-gradient-to-br from-purple-500/20 to-pink-500/20 backdrop-blur-lg rounded-xl p-6 border border-white/20">
+                    <Trophy className="mb-3 text-yellow-400" size={32} />
+                    <div className="text-3xl font-bold mb-1">{totalProgress}%</div>
+                    <div className="text-sm text-purple-200">Overall Progress</div>
+                  </div>
+                  <div className="bg-gradient-to-br from-blue-500/20 to-cyan-500/20 backdrop-blur-lg rounded-xl p-6 border border-white/20">
+                    <BookOpen className="mb-3 text-blue-400" size={32} />
+                    <div className="text-3xl font-bold mb-1">{topics.length}</div>
+                    <div className="text-sm text-blue-200">Active Topics</div>
+                  </div>
+                  <div className="bg-gradient-to-br from-green-500/20 to-emerald-500/20 backdrop-blur-lg rounded-xl p-6 border border-white/20">
+                    <Target className="mb-3 text-green-400" size={32} />
+                    <div className="text-3xl font-bold mb-1">
+                      {topics.reduce((acc, t) => acc + t.subtopics.filter(st => st.completed).length, 0)}
+                    </div>
+                    <div className="text-sm text-green-200">Completed Subtopics</div>
+                  </div>
+                </div>
+
+                <div className="bg-white/10 backdrop-blur-lg rounded-xl p-6 border border-white/20">
+                  <h2 className="text-xl font-bold mb-4">Recent Topics</h2>
+                  {topics.length === 0 ? (
+                    <div className="text-center py-8 text-purple-200">
+                      <BookOpen size={48} className="mx-auto mb-4 opacity-50" />
+                      <p>No topics yet. Add your first topic to get started!</p>
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      {topics.slice(-3).reverse().map(topic => (
+                        <div 
+                          key={topic.id}
+                          className="bg-white/5 rounded-lg p-4 hover:bg-white/10 transition cursor-pointer"
+                          onClick={() => {
+                            setSelectedTopic(topic);
+                            setCurrentView('topics');
+                          }}
+                        >
+                          <div className="flex items-center justify-between mb-2">
+                            <h3 className="font-semibold">{topic.name}</h3>
+                            <span className="text-sm text-purple-300">{topic.progress}%</span>
+                          </div>
+                          <div className="w-full bg-white/10 rounded-full h-2">
+                            <div 
+                              className="bg-gradient-to-r from-purple-500 to-pink-500 h-2 rounded-full transition-all"
+                              style={{ width: `${topic.progress}%` }}
+                            />
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Topics View */}
+            {currentView === 'topics' && (
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                {/* Topics List */}
+                <div className="lg:col-span-1 space-y-4">
+                  <button
+                    onClick={() => setShowAddTopic(true)}
+                    className="w-full bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 text-white rounded-lg py-3 px-4 font-semibold flex items-center justify-center gap-2 transition"
+                  >
+                    <Plus size={20} />
+                    Add New Topic
+                  </button>
+
+                  <div className="space-y-2">
+                    {topics.map(topic => (
+                      <div
+                        key={topic.id}
+                        className={`bg-white/10 backdrop-blur-lg rounded-lg p-4 border cursor-pointer transition ${
+                          selectedTopic?.id === topic.id
+                            ? 'border-purple-400 bg-white/20'
+                            : 'border-white/20 hover:bg-white/15'
+                        }`}
+                        onClick={() => setSelectedTopic(topic)}
+                      >
+                        <div className="flex items-center justify-between mb-2">
+                          <h3 className="font-semibold">{topic.name}</h3>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (confirm('Delete this topic?')) deleteTopic(topic.id);
+                            }}
+                            className="text-red-400 hover:text-red-300"
+                          >
+                            <X size={16} />
+                          </button>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <div className="flex-1 bg-white/10 rounded-full h-1.5">
+                            <div 
+                              className="bg-purple-500 h-1.5 rounded-full"
+                              style={{ width: `${topic.progress}%` }}
+                            />
+                          </div>
+                          <span className="text-xs text-purple-300">{topic.progress}%</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Topic Details */}
+                <div className="lg:col-span-2">
+                  {selectedTopic ? (
+                    <div className="space-y-4">
+                      <div className="bg-white/10 backdrop-blur-lg rounded-xl p-6 border border-white/20">
+                        <h2 className="text-2xl font-bold mb-4">{selectedTopic.name}</h2>
+                        
+                        <div className="space-y-3 mb-6">
+                          {selectedTopic.subtopics.map(subtopic => (
+                            <div key={subtopic.id} className="bg-white/5 rounded-lg p-4">
+                              <div className="flex items-start gap-3">
+                                <button
+                                  onClick={() => toggleSubtopic(selectedTopic.id, subtopic.id)}
+                                  className={`mt-1 w-6 h-6 rounded-md border-2 flex items-center justify-center transition ${
+                                    subtopic.completed
+                                      ? 'bg-green-500 border-green-500'
+                                      : 'border-white/30 hover:border-white/50'
+                                  }`}
+                                >
+                                  {subtopic.completed && <Check size={16} />}
+                                </button>
+                                <div className="flex-1">
+                                  <h4 className="font-semibold mb-1">{subtopic.name}</h4>
+                                  <p className="text-sm text-purple-200 mb-2">{subtopic.description}</p>
+                                  <div className="flex items-center gap-4 text-xs text-purple-300">
+                                    <span>⏱️ {subtopic.estimatedHours}h</span>
+                                    <span>📚 {subtopic.resources.length} resources</span>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+
+                        {selectedTopic.tips.length > 0 && (
+                          <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-4">
+                            <div className="flex items-center gap-2 mb-3">
+                              <Lightbulb className="text-amber-400" size={20} />
+                              <h3 className="font-semibold">Tips</h3>
+                            </div>
+                            <ul className="space-y-2 text-sm text-purple-200">
+                              {selectedTopic.tips.map((tip, idx) => (
+                                <li key={idx} className="flex gap-2">
+                                  <span>•</span>
+                                  <span>{tip}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Chat Interface */}
+                      <div className="bg-white/10 backdrop-blur-lg rounded-xl p-6 border border-white/20">
+                        <div className="flex items-center gap-2 mb-4">
+                          <MessageSquare size={20} />
+                          <h3 className="font-semibold">Ask Your Coach</h3>
+                        </div>
+                        
+                        <div className="space-y-3 mb-4 max-h-64 overflow-y-auto">
+                          {chatMessages.map((msg, idx) => (
+                            <div
+                              key={idx}
+                              className={`p-3 rounded-lg ${
+                                msg.role === 'user'
+                                  ? 'bg-purple-500/20 ml-8'
+                                  : 'bg-white/5 mr-8'
+                              }`}
+                            >
+                              <div className="text-sm">{msg.text}</div>
+                            </div>
+                          ))}
+                          {isLoading && (
+                            <div className="bg-white/5 p-3 rounded-lg mr-8">
+                              <div className="flex gap-1">
+                                <div className="w-2 h-2 bg-purple-400 rounded-full animate-bounce" style={{animationDelay: '0ms'}} />
+                                <div className="w-2 h-2 bg-purple-400 rounded-full animate-bounce" style={{animationDelay: '150ms'}} />
+                                <div className="w-2 h-2 bg-purple-400 rounded-full animate-bounce" style={{animationDelay: '300ms'}} />
+                              </div>
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="flex gap-2">
+                          <input
+                            type="text"
+                            value={userInput}
+                            onChange={(e) => setUserInput(e.target.value)}
+                            onKeyPress={(e) => e.key === 'Enter' && askQuestion()}
+                            placeholder="Ask for explanations, quizzes, or tips..."
+                            className="flex-1 bg-white/10 border border-white/20 rounded-lg px-4 py-2 focus:outline-none focus:border-purple-400"
+                          />
+                          <button
+                            onClick={askQuestion}
+                            disabled={isLoading || !userInput.trim()}
+                            className="bg-purple-500 hover:bg-purple-600 disabled:opacity-50 disabled:cursor-not-allowed px-6 py-2 rounded-lg font-semibold transition"
+                          >
+                            Send
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="bg-white/10 backdrop-blur-lg rounded-xl p-12 border border-white/20 text-center">
+                      <BookOpen size={64} className="mx-auto mb-4 opacity-30" />
+                      <p className="text-purple-200">Select a topic to view details and chat with your coach</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Add Topic Modal */}
+          {showAddTopic && (
+            <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+              <div className="bg-slate-800 rounded-xl p-6 max-w-md w-full border border-white/20">
+                <h3 className="text-xl font-bold mb-4">Add New Topic</h3>
+                <input
+                  type="text"
+                  value={newTopicName}
+                  onChange={(e) => setNewTopicName(e.target.value)}
+                  placeholder="e.g., System Design, Data Structures, React..."
+                  className="w-full bg-white/10 border border-white/20 rounded-lg px-4 py-3 mb-4 focus:outline-none focus:border-purple-400"
+                  onKeyPress={(e) => e.key === 'Enter' && newTopicName.trim() && generateLearningPath(newTopicName)}
+                />
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => {
+                      setShowAddTopic(false);
+                      setNewTopicName('');
+                    }}
+                    className="flex-1 bg-white/10 hover:bg-white/20 py-2 rounded-lg transition"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => newTopicName.trim() && generateLearningPath(newTopicName)}
+                    disabled={isLoading || !newTopicName.trim()}
+                    className="flex-1 bg-purple-500 hover:bg-purple-600 disabled:opacity-50 py-2 rounded-lg font-semibold transition"
+                  >
+                    {isLoading ? 'Generating...' : 'Generate Path'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    };
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<JobPrepAgent />);
+  </script>
+</body>
+</html>
